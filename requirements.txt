@@ -7,3 +7,4 @@ wordcloud
 matplotlib
 seaborn
 textstat
+tensorflow
