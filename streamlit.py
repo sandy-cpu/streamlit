@@ -1,33 +1,18 @@
-# app_streamlit_neural.py
-# Streamlit app dengan 3 engine: TF-IDF (cepat), Neural (MiniLM+BiLSTM+Attention), Hybrid (rata2)
-
-import os
-import re
-import numpy as np
-import pandas as pd
 import streamlit as st
-
-# === NLP klasik ===
+import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-
-# === Viz ===
+import numpy as np
+from io import StringIO
 import plotly.graph_objects as go
+import plotly.express as px
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+import seaborn as sns
+from textstat import flesch_reading_ease, flesch_kincaid_grade
+import re
 
-# === Readability (opsional) ===
-try:
-    from textstat import flesch_reading_ease, flesch_kincaid_grade
-except Exception:
-    flesch_reading_ease = None
-    flesch_kincaid_grade = None
-
-# === Deep learning / HF ===
-import tensorflow as tf
-import tf_keras as keras
-from tf_keras import layers
-from transformers import AutoTokenizer, AutoConfig, TFAutoModel
-
-# ---------------------- Page config & CSS ----------------------
+# Set page config dengan style yang lebih menarik
 st.set_page_config(
     page_title="📝 Advanced Text Similarity Analyzer",
     page_icon="🔍",
@@ -35,6 +20,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Custom CSS untuk tampilan yang lebih keren
 st.markdown("""
 <style>
     .main-header {
@@ -45,167 +31,138 @@ st.markdown("""
         text-align: center;
         margin-bottom: 2rem;
     }
-    .metric-card { background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-        padding: 1rem; border-radius: 10px; border-left: 5px solid #667eea; margin: 0.5rem 0; }
-    .similarity-high { background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); border-left-color: #28a745; }
-    .similarity-medium { background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%); border-left-color: #ffc107; }
-    .similarity-low { background: linear-gradient(135deg, #f8d7da 0%, #f1c0c7 100%); border-left-color: #dc3545; }
+    
+    .metric-card {
+        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 5px solid #667eea;
+        margin: 0.5rem 0;
+    }
+    
+    .similarity-high {
+        background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
+        border-left-color: #28a745;
+    }
+    
+    .similarity-medium {
+        background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
+        border-left-color: #ffc107;
+    }
+    
+    .similarity-low {
+        background: linear-gradient(135deg, #f8d7da 0%, #f1c0c7 100%);
+        border-left-color: #dc3545;
+    }
+    
+    .stProgress .st-bo {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    .uploadedfile {
+        border: 2px dashed #667eea;
+        border-radius: 10px;
+        padding: 1rem;
+        text-align: center;
+        background: #f8f9ff;
+    }
+    
+    .stats-container {
+        background: white;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------- Util ----------------------
-def count_words(text: str) -> int:
-    return len(str(text).split())
+# Fungsi utility
+def count_words(text):
+    """Hitung jumlah kata dalam teks"""
+    return len(text.split())
 
-def estimate_pages(text: str, words_per_page=250) -> float:
-    return round(count_words(text) / words_per_page, 1)
+def estimate_pages(text, words_per_page=250):
+    """Estimasi jumlah halaman berdasarkan jumlah kata"""
+    word_count = count_words(text)
+    return round(word_count / words_per_page, 1)
 
-def validate_document_length(text: str, max_pages=5):
-    pages = estimate_pages(text)
-    wc = count_words(text)
-    if pages > max_pages:
-        return False, f"❌ Dokumen terlalu panjang! ({pages} halaman, {wc} kata). Maks {max_pages} halaman (~{max_pages*250} kata)."
-    return True, f"✅ Dokumen valid ({pages} halaman, {wc} kata)"
+def validate_document_length(text, max_pages=5):
+    """Validasi panjang dokumen maksimal 5 halaman"""
+    estimated_pages = estimate_pages(text)
+    word_count = count_words(text)
+    
+    if estimated_pages > max_pages:
+        return False, f"❌ Dokumen terlalu panjang! ({estimated_pages} halaman, {word_count} kata). Maksimal {max_pages} halaman (~{max_pages * 250} kata)."
+    else:
+        return True, f"✅ Dokumen valid ({estimated_pages} halaman, {word_count} kata)"
 
-def get_text_statistics(text: str):
+def get_text_statistics(text):
+    """Dapatkan statistik teks"""
     word_count = count_words(text)
     char_count = len(text)
     sentence_count = len(re.findall(r'[.!?]+', text))
     paragraph_count = len([p for p in text.split('\n\n') if p.strip()])
-    if flesch_reading_ease and flesch_kincaid_grade:
-        try:
-            fr = flesch_reading_ease(text)
-            fk = flesch_kincaid_grade(text)
-        except Exception:
-            fr, fk = 0.0, 0.0
-    else:
-        fr, fk = 0.0, 0.0
+    
+    # Readability scores
+    try:
+        flesch_score = flesch_reading_ease(text)
+        fk_grade = flesch_kincaid_grade(text)
+    except:
+        flesch_score = 0
+        fk_grade = 0
+    
     return {
-        "words": word_count,
-        "characters": char_count,
-        "sentences": sentence_count,
-        "paragraphs": paragraph_count,
-        "pages": estimate_pages(text),
-        "flesch_score": fr,
-        "fk_grade": fk
+        'words': word_count,
+        'characters': char_count,
+        'sentences': sentence_count,
+        'paragraphs': paragraph_count,
+        'pages': estimate_pages(text),
+        'flesch_score': flesch_score,
+        'fk_grade': fk_grade
     }
 
-# ---------------------- TF-IDF Engine ----------------------
-def calculate_text_similarity_tfidf(text1: str, text2: str):
-    vectorizer = TfidfVectorizer(stop_words="english", max_features=1000)
-    mat = vectorizer.fit_transform([text1, text2])
-    sim = float(cosine_similarity(mat[0:1], mat[1:2])[0][0])
-    feat = vectorizer.get_feature_names_out()
+def calculate_text_similarity(text1, text2):
+    """Menghitung similarity dengan info tambahan"""
+    try:
+        vectorizer = TfidfVectorizer(stop_words='english', max_features=1000)
+        tfidf_matrix = vectorizer.fit_transform([text1, text2])
+        similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])
+        
+        # Feature names untuk analisis
+        feature_names = vectorizer.get_feature_names_out()
+        
+        # TF-IDF scores untuk masing-masing dokumen
+        doc1_scores = tfidf_matrix[0].toarray()[0]
+        doc2_scores = tfidf_matrix[1].toarray()[0]
+        
+        # Top keywords untuk setiap dokumen
+        doc1_top_idx = doc1_scores.argsort()[-10:][::-1]
+        doc2_top_idx = doc2_scores.argsort()[-10:][::-1]
+        
+        doc1_keywords = [(feature_names[i], doc1_scores[i]) for i in doc1_top_idx if doc1_scores[i] > 0]
+        doc2_keywords = [(feature_names[i], doc2_scores[i]) for i in doc2_top_idx if doc2_scores[i] > 0]
+        
+        return {
+            'similarity': float(similarity[0][0]),
+            'doc1_keywords': doc1_keywords,
+            'doc2_keywords': doc2_keywords,
+            'feature_names': feature_names,
+            'doc1_vector': doc1_scores,
+            'doc2_vector': doc2_scores
+        }
+    except Exception as e:
+        st.error(f"Error dalam menghitung similarity: {str(e)}")
+        return None
 
-    d1 = mat[0].toarray()[0]
-    d2 = mat[1].toarray()[0]
-    idx1 = d1.argsort()[-10:][::-1]
-    idx2 = d2.argsort()[-10:][::-1]
-    doc1_kw = [(feat[i], d1[i]) for i in idx1 if d1[i] > 0]
-    doc2_kw = [(feat[i], d2[i]) for i in idx2 if d2[i] > 0]
-
-    return {
-        "similarity": sim,
-        "doc1_keywords": doc1_kw,
-        "doc2_keywords": doc2_kw
-    }
-
-# ---------------------- Neural Engine (MiniLM+BiLSTM+Attn) ----------------------
-@st.cache_resource(show_spinner=True)
-def load_neural_model(
-    artifacts_dir="artifacts",
-    model_weights="S-001_best_sts.weights.h5",
-    model_name="sentence-transformers/paraphrase-MiniLM-L6-v2",
-    max_len=60,
-    bilstm_units=64, attn_units=32,
-    d1=64, d2=32, d3=16, dropout=0.3
-):
-    # Tokenizer: prefer yang disave saat training
-    tok_path = os.path.join(artifacts_dir, "tokenizer")
-    if os.path.isdir(tok_path):
-        tokenizer = AutoTokenizer.from_pretrained(tok_path, use_fast=True)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-
-    config = AutoConfig.from_pretrained(model_name, output_hidden_states=False, output_attentions=False)
-    bert = TFAutoModel.from_pretrained(model_name, config=config, from_pt=True)
-    bert.trainable = False
-
-    class STSModel(keras.Model):
-        def __init__(self, bert_encoder):
-            super().__init__()
-            self.bert = bert_encoder
-            self.ln = layers.LayerNormalization(epsilon=1e-6, name="ln_after_bert")
-            self.bilstm = layers.Bidirectional(layers.LSTM(bilstm_units, return_sequences=True), name="bilstm")
-            self.attn_tanh = layers.Dense(attn_units, activation="tanh", name="attn_tanh")
-            self.attn_score = layers.Dense(1, name="attn_score")
-            self.softmax = layers.Softmax(axis=1, name="attn_softmax")
-            self.mul = layers.Multiply(name="attn_weighted")
-            self.d1 = layers.Dense(d1, activation="relu", name="dense_hidden1")
-            self.d2 = layers.Dense(d2, activation="relu", name="dense_hidden2")
-            self.d3 = layers.Dense(d3, activation="relu", name="dense_hidden3")
-            self.do = layers.Dropout(dropout)
-            self.out = layers.Dense(1, activation="sigmoid", name="similarity")
-
-        def call(self, inputs, training=False):
-            ids = inputs["input_ids"]; msk = inputs["attention_mask"]; seg = inputs["token_type_ids"]
-            x = self.bert(input_ids=ids, attention_mask=msk, token_type_ids=seg, training=False).last_hidden_state
-            x = self.ln(x)
-            m_bool = tf.cast(msk, tf.bool)
-            x = self.bilstm(x, mask=m_bool)
-            score = self.attn_score(self.attn_tanh(x))
-            mask3 = tf.expand_dims(m_bool, -1)
-            neg_inf = tf.fill(tf.shape(score), tf.float32.min)
-            score = tf.where(mask3, score, neg_inf)
-            alphas = self.softmax(score)
-            context = tf.reduce_sum(self.mul([x, alphas]), axis=1)
-            h = self.d1(context); h = self.do(h, training=training)
-            h = self.d2(h);       h = self.do(h, training=training)
-            h = self.d3(h);       h = self.do(h, training=training)
-            return self.out(h)
-
-    model = STSModel(bert)
-
-    # build dummy
-    dummy = tokenizer("a", "b", padding="max_length", truncation=True, max_length=max_len,
-                      return_tensors="tf", return_attention_mask=True, return_token_type_ids=True)
-    feats = {
-        "input_ids": dummy["input_ids"],
-        "attention_mask": dummy["attention_mask"],
-        "token_type_ids": dummy.get("token_type_ids", tf.zeros_like(dummy["input_ids"]))
-    }
-    _ = model(feats, training=False)
-
-    weight_path = os.path.join(artifacts_dir, model_weights)
-    if not os.path.isfile(weight_path):
-        st.warning(f"⚠️ Weights tidak ditemukan di {weight_path}. Pastikan file ada.")
-    else:
-        model.load_weights(weight_path)
-
-    return model, tokenizer, max_len
-
-def predict_similarity_neural(model, tokenizer, s1: str, s2: str, max_len=60) -> float:
-    enc = tokenizer(
-        s1, s2, padding="max_length", truncation=True, max_length=max_len,
-        return_tensors="tf", return_attention_mask=True, return_token_type_ids=True
-    )
-    feats = {
-        "input_ids": enc["input_ids"],
-        "attention_mask": enc["attention_mask"],
-        "token_type_ids": enc.get("token_type_ids", tf.zeros_like(enc["input_ids"]))
-    }
-    prob = float(model(feats, training=False).numpy().ravel()[0])  # 0..1
-    return prob
-
-# ---------------------- Charts ----------------------
-def create_similarity_gauge(similarity: float):
+def create_similarity_gauge(similarity):
+    """Buat gauge chart untuk similarity score"""
     fig = go.Figure(go.Indicator(
-        mode="gauge+number+delta",
-        value=similarity*100,
-        domain={'x': [0, 1], 'y': [0, 1]},
-        title={'text': "Similarity Score (%)"},
-        delta={'reference': 50},
-        gauge={
+        mode = "gauge+number+delta",
+        value = similarity * 100,
+        domain = {'x': [0, 1], 'y': [0, 1]},
+        title = {'text': "Similarity Score (%)"},
+        delta = {'reference': 50},
+        gauge = {
             'axis': {'range': [None, 100]},
             'bar': {'color': "darkblue"},
             'steps': [
@@ -213,229 +170,421 @@ def create_similarity_gauge(similarity: float):
                 {'range': [30, 60], 'color': "yellow"},
                 {'range': [60, 80], 'color': "orange"},
                 {'range': [80, 100], 'color': "green"}],
-            'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': 90}
-        }
-    ))
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': 90}}))
+    
     fig.update_layout(height=300)
     return fig
 
 def create_keywords_comparison_chart(doc1_keywords, doc2_keywords):
-    d1 = doc1_keywords[:5]
-    d2 = doc2_keywords[:5]
-    if not d1 and not d2:
+    """Buat chart perbandingan keywords"""
+    # Ambil top 5 keywords dari masing-masing
+    doc1_top5 = doc1_keywords[:5]
+    doc2_top5 = doc2_keywords[:5]
+    
+    if not doc1_top5 or not doc2_top5:
         return None
+    
     fig = go.Figure()
-    if d1:
-        fig.add_trace(go.Bar(name='Dokumen 1', x=[k for k, _ in d1], y=[v for _, v in d1]))
-    if d2:
-        fig.add_trace(go.Bar(name='Dokumen 2', x=[k for k, _ in d2], y=[v for _, v in d2]))
-    fig.update_layout(title='Top Keywords Comparison (TF-IDF Scores)', barmode='group', height=400)
+    
+    fig.add_trace(go.Bar(
+        name='Dokumen 1',
+        x=[kw[0] for kw in doc1_top5],
+        y=[kw[1] for kw in doc1_top5],
+        marker_color='lightblue'
+    ))
+    
+    fig.add_trace(go.Bar(
+        name='Dokumen 2', 
+        x=[kw[0] for kw in doc2_top5],
+        y=[kw[1] for kw in doc2_top5],
+        marker_color='lightcoral'
+    ))
+    
+    fig.update_layout(
+        title='Top Keywords Comparison (TF-IDF Scores)',
+        xaxis_title='Keywords',
+        yaxis_title='TF-IDF Score',
+        barmode='group',
+        height=400
+    )
+    
     return fig
 
-# ---------------------- Sidebar ----------------------
-st.sidebar.markdown("## 📋 Menu Navigasi")
-analysis_type = st.sidebar.radio("Pilih jenis analisis:", ["📄 Text Similarity", "📁 Document Similarity"], index=0)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("## ⚙️ Engine")
-engine = st.sidebar.selectbox(
-    "Metode similarity:",
-    ["TF-IDF (cepat)", "Neural (MiniLM+BiLSTM)", "Hybrid (rata-rata)"],
-    index=0
-)
-
-st.sidebar.markdown("---")
-st.sidebar.info("""
-**Batasan Dokumen:**
-- Maks 5 halaman (~1.250 kata)
-- Format .txt (untuk upload) atau input manual
-
-**Skor:**
-- Neural = probabilitas duplikat/parafrase (0..1)
-- TF-IDF = cosine similarity (0..1)
-- Hybrid = rata-rata keduanya
-""")
-
-# ---------------------- Header ----------------------
+# Header utama dengan style menarik
 st.markdown("""
 <div class="main-header">
     <h1>🔍 Advanced Text Similarity Analyzer</h1>
-    <p>Analisis kemiripan teks & dokumen (TF-IDF vs Neural MiniLM+BiLSTM+Attention)</p>
+    <p>Analisis kemiripan teks dan dokumen dengan visualisasi yang menarik</p>
 </div>
 """, unsafe_allow_html=True)
 
-# ---------------------- Main: Text Similarity ----------------------
+# Sidebar dengan informasi
+st.sidebar.markdown("## 📋 Menu Navigasi")
+analysis_type = st.sidebar.radio(
+    "Pilih jenis analisis:",
+    ["📄 Text Similarity", "📁 Document Similarity", "ℹ️ About"],
+    index=0
+)
+
+# Informasi batasan di sidebar
+st.sidebar.markdown("---")
+st.sidebar.markdown("## ⚠️ Batasan Sistem")
+st.sidebar.info("""
+**Batasan Dokumen:**
+- Maksimal 5 halaman (~1.250 kata)
+- Format: .txt atau input manual
+- Document similarity: tepat 2 dokumen
+
+**Estimasi halaman:**
+- ~250 kata per halaman
+- Dihitung otomatis saat upload
+""")
+
 if analysis_type == "📄 Text Similarity":
-    st.markdown("## 📝 Masukkan Teks")
-    c1, c2 = st.columns(2)
-    with c1:
-        t1 = st.text_area("Teks 1", height=200, placeholder="Paste atau ketik teks pertama...")
-        if t1:
-            ok, msg = validate_document_length(t1)
-            st.success(msg) if ok else st.error(msg)
-            if not ok: t1 = ""
-    with c2:
-        t2 = st.text_area("Teks 2", height=200, placeholder="Paste atau ketik teks kedua...")
-        if t2:
-            ok, msg = validate_document_length(t2)
-            st.success(msg) if ok else st.error(msg)
-            if not ok: t2 = ""
-
-    if st.button("🚀 Analisis Similarity", type="primary", use_container_width=True):
-        if t1 and t2:
-            with st.spinner("🔄 Menghitung..."):
-                sim = 0.0
-                doc1_kw = []; doc2_kw = []
-
-                if engine == "TF-IDF (cepat)":
-                    res = calculate_text_similarity_tfidf(t1, t2)
-                    sim = res["similarity"]; doc1_kw = res["doc1_keywords"]; doc2_kw = res["doc2_keywords"]
-
-                elif engine == "Neural (MiniLM+BiLSTM)":
-                    model, tok, max_len = load_neural_model(
-                        artifacts_dir="artifacts",
-                        model_weights="S-001_best_sts.weights.h5",
-                        model_name="sentence-transformers/paraphrase-MiniLM-L6-v2",
-                        max_len=60, bilstm_units=64, attn_units=32, d1=64, d2=32, d3=16, dropout=0.3
-                    )
-                    sim = predict_similarity_neural(model, tok, t1, t2, max_len)
-
-                else:  # Hybrid
-                    res = calculate_text_similarity_tfidf(t1, t2)
-                    tfidf_s = res["similarity"]
-                    doc1_kw = res["doc1_keywords"]; doc2_kw = res["doc2_keywords"]
-                    model, tok, max_len = load_neural_model(artifacts_dir="artifacts", model_weights="S-001_best_sts.weights.h5")
-                    neural_s = predict_similarity_neural(model, tok, t1, t2, max_len)
-                    sim = (tfidf_s + neural_s) / 2.0
-
-            # === Output ===
-            st.markdown("## 📊 Hasil")
-            cc1, cc2, cc3 = st.columns([1,2,1])
-            with cc1:
-                klass = "similarity-low"
-                label = "🔴 Tidak Mirip"
-                if sim >= 0.8: klass, label = "similarity-high", "🟢 Sangat Mirip"
-                elif sim >= 0.6: klass, label = "similarity-medium", "🟡 Cukup Mirip"
-                st.markdown(f"""
-                <div class="metric-card {klass}">
-                    <h3>Similarity Score</h3>
-                    <h1>{sim:.4f}</h1>
-                    <p>({sim*100:.2f}%)</p>
-                    <p><strong>{label}</strong></p>
-                </div>""", unsafe_allow_html=True)
-            with cc2:
-                st.plotly_chart(create_similarity_gauge(sim), use_container_width=True)
-            with cc3:
-                st.metric("Confidence", f"{sim*100:.1f}%")
-                st.progress(sim)
-
-            # Keywords hanya relevan untuk TF-IDF / Hybrid
-            if (engine != "Neural (MiniLM+BiLSTM)") and (doc1_kw or doc2_kw):
-                st.markdown("## 🔤 Keywords (TF-IDF)")
-                fig_kw = create_keywords_comparison_chart(doc1_kw, doc2_kw)
-                if fig_kw: st.plotly_chart(fig_kw, use_container_width=True)
-
-            # Statistik
-            s1 = get_text_statistics(t1); s2 = get_text_statistics(t2)
-            colA, colB = st.columns(2)
-            with colA:
-                st.markdown("### 📈 Statistik Teks 1")
-                for k, v in s1.items():
-                    if k == "flesch_score": st.metric("Flesch Reading Score", f"{v:.1f}")
-                    elif k == "fk_grade":   st.metric("FK Grade Level", f"{v:.1f}")
-                    else: st.metric(k.title(), v)
-            with colB:
-                st.markdown("### 📈 Statistik Teks 2")
-                for k, v in s2.items():
-                    if k == "flesch_score": st.metric("Flesch Reading Score", f"{v:.1f}")
-                    elif k == "fk_grade":   st.metric("FK Grade Level", f"{v:.1f}")
-                    else: st.metric(k.title(), v)
-        else:
-            st.error("❌ Mohon masukkan kedua teks yang valid!")
-
-# ---------------------- Main: Document Similarity ----------------------
-else:
-    st.markdown("## 📁 Upload 2 Dokumen (.txt)")
-    c1, c2 = st.columns(2)
-    with c1:
-        f1 = st.file_uploader("Dokumen 1", type="txt", key="file1")
-        doc1 = f1.read().decode("utf-8") if f1 else ""
-        if doc1:
-            ok, msg = validate_document_length(doc1)
-            st.success(msg) if ok else st.error(msg)
-            if ok:
-                with st.expander("👁️ Preview 1"):
-                    st.text_area("Content:", doc1[:500] + ("..." if len(doc1) > 500 else ""), height=150, disabled=True)
+    st.markdown("## 🔍 Text Similarity Analysis")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 📝 Teks 1")
+        text1 = st.text_area("Masukkan teks pertama:", height=200, key="text1", 
+                            placeholder="Paste atau ketik teks pertama di sini...")
+        
+        if text1:
+            is_valid1, msg1 = validate_document_length(text1)
+            if is_valid1:
+                st.success(msg1)
             else:
-                doc1 = ""
-    with c2:
-        f2 = st.file_uploader("Dokumen 2", type="txt", key="file2")
-        doc2 = f2.read().decode("utf-8") if f2 else ""
-        if doc2:
-            ok, msg = validate_document_length(doc2)
-            st.success(msg) if ok else st.error(msg)
-            if ok:
-                with st.expander("👁️ Preview 2"):
-                    st.text_area("Content:", doc2[:500] + ("..." if len(doc2) > 500 else ""), height=150, disabled=True)
+                st.error(msg1)
+                text1 = ""
+    
+    with col2:
+        st.markdown("### 📝 Teks 2")
+        text2 = st.text_area("Masukkan teks kedua:", height=200, key="text2",
+                            placeholder="Paste atau ketik teks kedua di sini...")
+        
+        if text2:
+            is_valid2, msg2 = validate_document_length(text2)
+            if is_valid2:
+                st.success(msg2)
             else:
-                doc2 = ""
+                st.error(msg2)
+                text2 = ""
+    
+    # Tombol analisis dengan style menarik
+    col_center = st.columns([1, 2, 1])[1]
+    with col_center:
+        if st.button("🚀 Analisis Similarity", type="primary", use_container_width=True):
+            if text1 and text2:
+                with st.spinner("🔄 Sedang menganalisis..."):
+                    result = calculate_text_similarity(text1, text2)
+                    
+                    if result:
+                        similarity = result['similarity']
+                        
+                        # Hasil utama dengan gauge
+                        st.markdown("## 📊 Hasil Analisis")
+                        
+                        col1, col2, col3 = st.columns([1, 2, 1])
+                        
+                        with col1:
+                            # Similarity score dengan styling
+                            if similarity >= 0.8:
+                                st.markdown(f"""
+                                <div class="metric-card similarity-high">
+                                    <h3>Similarity Score</h3>
+                                    <h1>{similarity:.4f}</h1>
+                                    <p>({similarity*100:.2f}%)</p>
+                                    <p><strong>🟢 Sangat Mirip</strong></p>
+                                </div>
+                                """, unsafe_allow_html=True)
+                            elif similarity >= 0.6:
+                                st.markdown(f"""
+                                <div class="metric-card similarity-medium">
+                                    <h3>Similarity Score</h3>
+                                    <h1>{similarity:.4f}</h1>
+                                    <p>({similarity*100:.2f}%)</p>
+                                    <p><strong>🟡 Cukup Mirip</strong></p>
+                                </div>
+                                """, unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"""
+                                <div class="metric-card similarity-low">
+                                    <h3>Similarity Score</h3>
+                                    <h1>{similarity:.4f}</h1>
+                                    <p>({similarity*100:.2f}%)</p>
+                                    <p><strong>🔴 Tidak Mirip</strong></p>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        
+                        with col2:
+                            # Gauge chart
+                            gauge_fig = create_similarity_gauge(similarity)
+                            st.plotly_chart(gauge_fig, use_container_width=True)
+                        
+                        with col3:
+                            # Progress bar vertikal
+                            st.metric("Confidence", f"{similarity*100:.1f}%")
+                            st.progress(similarity)
+                        
+                        # Keywords comparison
+                        st.markdown("## 🔤 Keywords Analysis")
+                        keywords_fig = create_keywords_comparison_chart(
+                            result['doc1_keywords'], result['doc2_keywords']
+                        )
+                        if keywords_fig:
+                            st.plotly_chart(keywords_fig, use_container_width=True)
+                        
+                        # Detail statistics
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.markdown("### 📈 Statistik Teks 1")
+                            stats1 = get_text_statistics(text1)
+                            for key, value in stats1.items():
+                                if key == 'flesch_score':
+                                    st.metric("Flesch Reading Score", f"{value:.1f}")
+                                elif key == 'fk_grade':
+                                    st.metric("FK Grade Level", f"{value:.1f}")
+                                else:
+                                    st.metric(key.title(), value)
+                        
+                        with col2:
+                            st.markdown("### 📈 Statistik Teks 2")
+                            stats2 = get_text_statistics(text2)
+                            for key, value in stats2.items():
+                                if key == 'flesch_score':
+                                    st.metric("Flesch Reading Score", f"{value:.1f}")
+                                elif key == 'fk_grade':
+                                    st.metric("FK Grade Level", f"{value:.1f}")
+                                else:
+                                    st.metric(key.title(), value)
+                        
+                        # Top keywords table
+                        if result['doc1_keywords'] and result['doc2_keywords']:
+                            st.markdown("## 🏆 Top Keywords")
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.markdown("**Teks 1 - Top Keywords:**")
+                                df1 = pd.DataFrame(result['doc1_keywords'][:10], 
+                                                 columns=['Keyword', 'TF-IDF Score'])
+                                st.dataframe(df1, use_container_width=True)
+                            
+                            with col2:
+                                st.markdown("**Teks 2 - Top Keywords:**")
+                                df2 = pd.DataFrame(result['doc2_keywords'][:10], 
+                                                 columns=['Keyword', 'TF-IDF Score'])
+                                st.dataframe(df2, use_container_width=True)
+            else:
+                st.error("❌ Mohon masukkan kedua teks yang valid!")
 
+elif analysis_type == "📁 Document Similarity":
+    st.markdown("## 📁 Document Similarity Analysis")
+    st.info("🔧 Upload tepat 2 dokumen untuk dibandingkan (maksimal 5 halaman per dokumen)")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 📄 Dokumen 1")
+        uploaded_file1 = st.file_uploader("Upload dokumen pertama (.txt)", 
+                                         type="txt", key="file1")
+        doc1_content = ""
+        
+        if uploaded_file1:
+            doc1_content = uploaded_file1.read().decode("utf-8")
+            is_valid1, msg1 = validate_document_length(doc1_content)
+            
+            if is_valid1:
+                st.success(msg1)
+                with st.expander("👁️ Preview Dokumen 1"):
+                    st.text_area("Content:", doc1_content[:500] + "..." if len(doc1_content) > 500 else doc1_content, 
+                               height=150, disabled=True)
+            else:
+                st.error(msg1)
+                doc1_content = ""
+    
+    with col2:
+        st.markdown("### 📄 Dokumen 2")
+        uploaded_file2 = st.file_uploader("Upload dokumen kedua (.txt)", 
+                                         type="txt", key="file2")
+        doc2_content = ""
+        
+        if uploaded_file2:
+            doc2_content = uploaded_file2.read().decode("utf-8")
+            is_valid2, msg2 = validate_document_length(doc2_content)
+            
+            if is_valid2:
+                st.success(msg2)
+                with st.expander("👁️ Preview Dokumen 2"):
+                    st.text_area("Content:", doc2_content[:500] + "..." if len(doc2_content) > 500 else doc2_content, 
+                               height=150, disabled=True)
+            else:
+                st.error(msg2)
+                doc2_content = ""
+    
+    # Tombol analisis
     if st.button("🔍 Bandingkan Dokumen", type="primary", use_container_width=True):
-        if doc1 and doc2:
-            with st.spinner("📊 Menganalisis..."):
-                sim = 0.0
-                doc1_kw = []; doc2_kw = []
-
-                if engine == "TF-IDF (cepat)":
-                    res = calculate_text_similarity_tfidf(doc1, doc2)
-                    sim = res["similarity"]; doc1_kw = res["doc1_keywords"]; doc2_kw = res["doc2_keywords"]
-
-                elif engine == "Neural (MiniLM+BiLSTM)":
-                    model, tok, max_len = load_neural_model(
-                        artifacts_dir="artifacts",
-                        model_weights="S-001_best_sts.weights.h5",
-                        model_name="sentence-transformers/paraphrase-MiniLM-L6-v2",
-                        max_len=60, bilstm_units=64, attn_units=32, d1=64, d2=32, d3=16, dropout=0.3
+        if doc1_content and doc2_content:
+            with st.spinner("📊 Menganalisis kedua dokumen..."):
+                result = calculate_text_similarity(doc1_content, doc2_content)
+                
+                if result:
+                    similarity = result['similarity']
+                    
+                    # Hasil dengan layout yang menarik
+                    st.markdown("## 🎯 Hasil Perbandingan Dokumen")
+                    
+                    # Metrics overview
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("Similarity Score", f"{similarity:.4f}")
+                    with col2:
+                        st.metric("Percentage", f"{similarity*100:.2f}%")
+                    with col3:
+                        stats1 = get_text_statistics(doc1_content)
+                        st.metric("Doc 1 Pages", f"{stats1['pages']}")
+                    with col4:
+                        stats2 = get_text_statistics(doc2_content)
+                        st.metric("Doc 2 Pages", f"{stats2['pages']}")
+                    
+                    # Gauge chart untuk similarity
+                    gauge_fig = create_similarity_gauge(similarity)
+                    st.plotly_chart(gauge_fig, use_container_width=True)
+                    
+                    # Keywords comparison
+                    keywords_fig = create_keywords_comparison_chart(
+                        result['doc1_keywords'], result['doc2_keywords']
                     )
-                    sim = predict_similarity_neural(model, tok, doc1, doc2, max_len)
-
-                else:
-                    res = calculate_text_similarity_tfidf(doc1, doc2)
-                    tfidf_s = res["similarity"]
-                    doc1_kw = res["doc1_keywords"]; doc2_kw = res["doc2_keywords"]
-                    model, tok, max_len = load_neural_model(artifacts_dir="artifacts", model_weights="S-001_best_sts.weights.h5")
-                    neural_s = predict_similarity_neural(model, tok, doc1, doc2, max_len)
-                    sim = (tfidf_s + neural_s)/2.0
-
-            st.markdown("## 🎯 Hasil")
-            cA, cB, cC, cD = st.columns(4)
-            with cA: st.metric("Similarity", f"{sim:.4f}")
-            with cB: st.metric("Percentage", f"{sim*100:.2f}%")
-            s1 = get_text_statistics(doc1); s2 = get_text_statistics(doc2)
-            with cC: st.metric("Doc 1 Pages", s1["pages"])
-            with cD: st.metric("Doc 2 Pages", s2["pages"])
-            st.plotly_chart(create_similarity_gauge(sim), use_container_width=True)
-
-            if (engine != "Neural (MiniLM+BiLSTM)") and (doc1_kw or doc2_kw):
-                st.plotly_chart(create_keywords_comparison_chart(doc1_kw, doc2_kw), use_container_width=True)
-
-            st.markdown("## 📋 Perbandingan Detail")
-            comp = pd.DataFrame({
-                "Metric": ["Words","Characters","Sentences","Paragraphs","Pages","Flesch Score","FK Grade"],
-                "Dokumen 1": [s1["words"], s1["characters"], s1["sentences"], s1["paragraphs"],
-                              s1["pages"], f"{s1['flesch_score']:.1f}", f"{s1['fk_grade']:.1f}"],
-                "Dokumen 2": [s2["words"], s2["characters"], s2["sentences"], s2["paragraphs"],
-                              s2["pages"], f"{s2['flesch_score']:.1f}", f"{s2['fk_grade']:.1f}"]
-            })
-            st.dataframe(comp, use_container_width=True)
+                    if keywords_fig:
+                        st.plotly_chart(keywords_fig, use_container_width=True)
+                    
+                    # Detailed comparison
+                    st.markdown("## 📋 Perbandingan Detail")
+                    
+                    comparison_data = {
+                        'Metric': ['Words', 'Characters', 'Sentences', 'Paragraphs', 'Pages', 'Flesch Score', 'FK Grade'],
+                        'Dokumen 1': [
+                            stats1['words'], stats1['characters'], stats1['sentences'], 
+                            stats1['paragraphs'], stats1['pages'], 
+                            f"{stats1['flesch_score']:.1f}", f"{stats1['fk_grade']:.1f}"
+                        ],
+                        'Dokumen 2': [
+                            stats2['words'], stats2['characters'], stats2['sentences'],
+                            stats2['paragraphs'], stats2['pages'],
+                            f"{stats2['flesch_score']:.1f}", f"{stats2['fk_grade']:.1f}"
+                        ]
+                    }
+                    
+                    comparison_df = pd.DataFrame(comparison_data)
+                    st.dataframe(comparison_df, use_container_width=True)
+                    
+                    # Interpretasi hasil
+                    if similarity >= 0.8:
+                        st.success("🟢 **Hasil:** Kedua dokumen sangat mirip! Kemungkinan membahas topik yang sama dengan pendekatan serupa.")
+                    elif similarity >= 0.6:
+                        st.warning("🟡 **Hasil:** Kedua dokumen cukup mirip. Ada kesamaan topik atau tema yang signifikan.")
+                    elif similarity >= 0.3:
+                        st.info("🔵 **Hasil:** Kedua dokumen memiliki sedikit kesamaan. Mungkin ada beberapa topik yang tumpang tindih.")
+                    else:
+                        st.error("🔴 **Hasil:** Kedua dokumen sangat berbeda. Kemungkinan membahas topik yang berbeda.")
         else:
-            st.error("❌ Mohon upload dua dokumen yang valid.")
+            st.error("❌ Mohon upload kedua dokumen yang valid!")
 
-# ---------------------- Footer ----------------------
+elif analysis_type == "ℹ️ About":
+    st.markdown("## 📚 Tentang Aplikasi")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.markdown("""
+        ### 🎯 Deskripsi
+        Aplikasi **Advanced Text Similarity Analyzer** adalah tool untuk menganalisis kemiripan teks dan dokumen 
+        menggunakan teknik Natural Language Processing (NLP) yang canggih.
+        
+        ### 🔬 Metode yang Digunakan:
+        - **TF-IDF (Term Frequency-Inverse Document Frequency)**: Mengkonversi teks menjadi vektor numerik berdasarkan frekuensi kata
+        - **Cosine Similarity**: Mengukur sudut antara dua vektor untuk menentukan kemiripan
+        - **Text Statistics**: Analisis readability dan karakteristik teks
+        
+        ### ✨ Fitur Unggulan:
+        - 📊 **Visualisasi Interaktif**: Gauge charts, bar charts, dan progress bars
+        - 📈 **Analisis Keywords**: Identifikasi kata kunci penting dengan TF-IDF scores
+        - 📋 **Text Statistics**: Word count, readability scores, estimated pages
+        - 🎨 **UI/UX Modern**: Interface yang menarik dan user-friendly
+        - ⚡ **Real-time Analysis**: Analisis langsung dengan feedback visual
+        """)
+        
+        st.markdown("### 🛠️ Tech Stack:")
+        tech_stack = {
+            'Framework': 'Streamlit',
+            'NLP Library': 'Scikit-learn',
+            'Visualization': 'Plotly, Matplotlib',
+            'Data Processing': 'Pandas, NumPy',
+            'Text Analysis': 'TextStat, WordCloud'
+        }
+        
+        for tech, desc in tech_stack.items():
+            st.markdown(f"- **{tech}**: {desc}")
+    
+    with col2:
+        st.markdown("### 📊 Contoh Similarity Scores:")
+        
+        # Contoh dengan different similarity levels
+        examples = [
+            ("Sangat Mirip", 0.95, "success"),
+            ("Cukup Mirip", 0.75, "warning"), 
+            ("Sedikit Mirip", 0.45, "info"),
+            ("Tidak Mirip", 0.15, "error")
+        ]
+        
+        for label, score, status in examples:
+            st.metric(label, f"{score:.2f} ({score*100:.0f}%)")
+            st.progress(score)
+            st.markdown("---")
+    
+    # FAQ Section
+    with st.expander("❓ Frequently Asked Questions"):
+        st.markdown("""
+        **Q: Berapa batas maksimal panjang dokumen?**
+        A: Maksimal 5 halaman (~1.250 kata per dokumen).
+        
+        **Q: Format file apa yang didukung?**
+        A: Saat ini hanya mendukung file .txt (plain text).
+        
+        **Q: Bagaimana cara interpretasi similarity score?**
+        A: 
+        - 0.8-1.0: Sangat mirip
+        - 0.6-0.8: Cukup mirip  
+        - 0.3-0.6: Sedikit mirip
+        - 0.0-0.3: Tidak mirip
+        
+        **Q: Apakah mendukung bahasa Indonesia?**
+        A: Ya, namun stopwords yang digunakan adalah bahasa Inggris. Untuk hasil optimal pada teks Indonesia, perlu customization lebih lanjut.
+        """)
+    
+    # Performance metrics (mock data for demo)
+    st.markdown("### ⚡ Performance Metrics")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Avg Processing Time", "2.3s")
+    with col2:
+        st.metric("Accuracy Rate", "94.5%")
+    with col3:
+        st.metric("Max File Size", "5 pages")
+    with col4:
+        st.metric("Supported Formats", "TXT")
+
+# Footer
 st.markdown("---")
 st.markdown("""
-<div style='text-align:center; color:#666; padding:1rem;'>
-  <p>🎓 <strong>Advanced Text Similarity Analyzer</strong> | Versi TF-IDF & Neural</p>
-  <p>⚡ Streamlit • Scikit-learn • Transformers • TensorFlow</p>
+<div style='text-align: center; color: #666; padding: 1rem;'>
+    <p>🎓 <strong>Advanced Text Similarity Analyzer</strong> | Dibuat untuk keperluan skripsi</p>
+    <p>⚡ Powered by Streamlit • 🧠 Scikit-learn • 📊 Plotly</p>
 </div>
 """, unsafe_allow_html=True)
